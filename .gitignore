@@ -45,3 +45,13 @@ build_release.log
 
 # 规划/分析文档（按需求不纳入版本库）
 docs/
+
+# Local/reference artifacts
+.ref/
+.harness/
+__pycache__/
+*.pyc
+boot.img
+boot_ghostkey.conf
+boot_kallsyms.txt
+boot_profile.json

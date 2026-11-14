@@ -7,9 +7,9 @@ import java.nio.ByteOrder
 /**
  * 把 KernelProfile 序列化为与原生 kernel_table.c 严格对齐的定长 blob。
  *
- * 布局（全小端，共 308 字节，version 4）：
+ * 布局（全小端，共 412 字节，version 5）：
  *   0    magic[4] "C982"
- *   4    u16 version = 4
+ *   4    u16 version = 5
  *   6    u16 flags (bit0 = recommend_shizuku)
  *   8    u64 page_offset
  *   16   u64 timer_link
@@ -38,12 +38,30 @@ import java.nio.ByteOrder
  *   296  u32 cred_user_ns
  *   300  u32 cred_ucounts
  *   304  u32 cred_groups
+ *   308  u64 init_task                      (version 5 起, ghostlock post-UAF)
+ *   316  u64 root_task_group
+ *   324  u64 misc_list
+ *   332  u64 uinput_misc
+ *   340  u64 simple_attr_read
+ *   348  u64 simple_attr_write
+ *   356  u64 debugfs_u64_get
+ *   364  u64 debugfs_u64_set
+ *   372  u64 debugfs_u64_format
+ *   380  u64 default_llseek
+ *   388  u64 call_usermodehelper_exec_work
+ *   396  u64 system_unbound_wq
+ *   404  u64 selinux_enforcing_off
+ *   412  u64 tracefs_worker_caller_off
+ *   420  u64 phys_offset
+ *   428  u64 phys_load
+ *   436  u32 tracefs_event_id
+ *   440  u32 reserved
  */
 object KernelProfileSerializer {
 
-    const val BLOB_SIZE = 308
+    const val BLOB_SIZE = 444
     private const val MAGIC = "C982"
-    private const val VERSION: Short = 4
+    private const val VERSION: Short = 5
 
     fun serialize(profile: KernelProfile): ByteArray {
         val buf = ByteBuffer.allocate(BLOB_SIZE).order(ByteOrder.LITTLE_ENDIAN)
@@ -77,6 +95,25 @@ object KernelProfileSerializer {
         buf.putInt(profile.credUserNs)
         buf.putInt(profile.credUcounts)
         buf.putInt(profile.credGroups)
+        // v5 ghostlock post-UAF / UMH offsets
+        buf.putLong(profile.initTask)
+        buf.putLong(profile.rootTaskGroup)
+        buf.putLong(profile.miscList)
+        buf.putLong(profile.uinputMisc)
+        buf.putLong(profile.simpleAttrRead)
+        buf.putLong(profile.simpleAttrWrite)
+        buf.putLong(profile.debugfsU64Get)
+        buf.putLong(profile.debugfsU64Set)
+        buf.putLong(profile.debugfsU64Format)
+        buf.putLong(profile.defaultLlseek)
+        buf.putLong(profile.callUsermodehelperExecWork)
+        buf.putLong(profile.systemUnboundWq)
+        buf.putLong(profile.selinuxEnforcingOff)
+        buf.putLong(profile.tracefsWorkerCallerOff)
+        buf.putLong(profile.physOffset)
+        buf.putLong(profile.physLoad)
+        buf.putInt(profile.tracefsEventId)
+        buf.putInt(0) // reserved
         return buf.array()
     }
 

@@ -47,13 +47,13 @@ fun gitShortCommit(): String = try {
 
 android {
     namespace = "com.EternalTimes.GhostKey"
-    compileSdk = 37
-    compileSdkMinor = 2
+    ndkVersion = "27.2.12479018"
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.EternalTimes.GhostKey"
         minSdk = 31
-        targetSdk = 37
+        targetSdk = 36
         versionCode = 24
         versionName = appVersionName
         // 界面显示用：注入当前 git 短提交 id（VERSION_NAME 由 AGP 自动写入 BuildConfig）
@@ -90,8 +90,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_27
-        targetCompatibility = JavaVersion.VERSION_27
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     buildFeatures {
@@ -105,7 +105,7 @@ android {
         // Manifest 中的声明是 Shizuku 模式要求，Instantiatable 检查在此属误报
         disable += "Instantiatable"
         toolchain {
-            languageVersion.set(JavaLanguageVersion.of(27))
+            languageVersion.set(JavaLanguageVersion.of(21))
         }
     }
 
@@ -133,7 +133,6 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
         }
     }
 }
@@ -141,13 +140,13 @@ android {
 // AGP 9 内置 Kotlin：kotlinOptions DSL 已移除，改用顶层 kotlin{} 的 compilerOptions
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27)
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
     }
 }
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(27))
+        languageVersion.set(JavaLanguageVersion.of(21))
     }
 }
 

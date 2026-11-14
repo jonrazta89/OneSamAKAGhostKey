@@ -96,6 +96,26 @@ data class ProfileDocument(
             credUserNs = (getLong("offset.cred_user_ns") ?: 144L).toInt(),
             credUcounts = (getLong("offset.cred_ucounts") ?: 152L).toInt(),
             credGroups = (getLong("offset.cred_groups") ?: 160L).toInt(),
+            // v5 ghostlock post-UAF / UMH offsets (optional)
+            initTask = getLong("offset.init_task") ?: getLong("offset.init_task_off") ?: 0L,
+            rootTaskGroup = getLong("offset.root_task_group") ?: getLong("offset.root_task_group_off") ?: 0L,
+            miscList = getLong("offset.misc_list") ?: getLong("offset.misc_list_off") ?: 0L,
+            uinputMisc = getLong("offset.uinput_misc") ?: getLong("offset.uinput_misc_off") ?: 0L,
+            simpleAttrRead = getLong("offset.simple_attr_read") ?: getLong("offset.simple_attr_read_off") ?: 0L,
+            simpleAttrWrite = getLong("offset.simple_attr_write") ?: getLong("offset.simple_attr_write_off") ?: 0L,
+            debugfsU64Get = getLong("offset.debugfs_u64_get") ?: getLong("offset.debugfs_u64_get_off") ?: 0L,
+            debugfsU64Set = getLong("offset.debugfs_u64_set") ?: getLong("offset.debugfs_u64_set_off") ?: 0L,
+            debugfsU64Format = getLong("offset.debugfs_u64_format") ?: getLong("offset.debugfs_u64_format_off") ?: 0L,
+            defaultLlseek = getLong("offset.default_llseek") ?: getLong("offset.default_llseek_off") ?: 0L,
+            callUsermodehelperExecWork = getLong("offset.call_usermodehelper_exec_work")
+                ?: getLong("offset.call_usermodehelper_exec_work_off") ?: 0L,
+            systemUnboundWq = getLong("offset.system_unbound_wq") ?: getLong("offset.system_unbound_wq_off") ?: 0L,
+            selinuxEnforcingOff = getLong("offset.selinux_enforcing_off")
+                ?: getLong("offset.selinux_enforcing") ?: 0L,
+            tracefsWorkerCallerOff = getLong("offset.tracefs_worker_caller_off") ?: 0L,
+            physOffset = getLong("offset.phys_offset") ?: 0L,
+            physLoad = getLong("offset.phys_load") ?: 0L,
+            tracefsEventId = (getLong("offset.tracefs_event_id") ?: 0L).toInt(),
         )
     }
 
@@ -146,6 +166,24 @@ data class ProfileDocument(
                 "cred_user_ns" to kp.credUserNs,
                 "cred_ucounts" to kp.credUcounts,
                 "cred_groups" to kp.credGroups,
+                // v5 ghostlock post-UAF / UMH offsets
+                "init_task" to kp.initTask,
+                "root_task_group" to kp.rootTaskGroup,
+                "misc_list" to kp.miscList,
+                "uinput_misc" to kp.uinputMisc,
+                "simple_attr_read" to kp.simpleAttrRead,
+                "simple_attr_write" to kp.simpleAttrWrite,
+                "debugfs_u64_get" to kp.debugfsU64Get,
+                "debugfs_u64_set" to kp.debugfsU64Set,
+                "debugfs_u64_format" to kp.debugfsU64Format,
+                "default_llseek" to kp.defaultLlseek,
+                "call_usermodehelper_exec_work" to kp.callUsermodehelperExecWork,
+                "system_unbound_wq" to kp.systemUnboundWq,
+                "selinux_enforcing_off" to kp.selinuxEnforcingOff,
+                "tracefs_worker_caller_off" to kp.tracefsWorkerCallerOff,
+                "phys_offset" to kp.physOffset,
+                "phys_load" to kp.physLoad,
+                "tracefs_event_id" to kp.tracefsEventId,
             )
             val fields = linkedMapOf<String, Any?>(
                 "release" to kp.release,
