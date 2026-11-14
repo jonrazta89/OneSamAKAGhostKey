@@ -58,6 +58,7 @@
 #include "kernel_table.h"
 #include "calib.h"
 #include "slide_resolve.h"
+#include "params.h"
 
 #define TRACE "/sys/kernel/tracing"
 #define TRIGGER TRACE "/events/kmem/rss_stat/trigger"
