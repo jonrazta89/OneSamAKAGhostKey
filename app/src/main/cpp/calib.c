@@ -1624,7 +1624,8 @@ int calib_a_main(int argc, char **argv)
 		goto out;
 	}
 
-	/* Cross-check: if timer-based slide is weak (< 64 samples), also try
+	/* Cross-check: if timer-based slide is weak (< 64 samples) or not
+	 * 2MiB-aligned (KASLR slides on arm64 must be 2MiB-aligned), try
 	 * tracefs leak to confirm or correct it. */
 	{
 		int weak = 0;
@@ -1635,8 +1636,10 @@ int calib_a_main(int argc, char **argv)
 				break;
 			}
 		}
+		if (!weak && (slide & (SR_SLIDE_ALIGN - 1)) != 0)
+			weak = 1;
 		if (weak) {
-			fprintf(stdout, "[calib_a] slide is weak, cross-checking with tracefs...\n");
+			fprintf(stdout, "[calib_a] slide is weak/unaligned, cross-checking with tracefs...\n");
 			if (g_have_syms && g_syms) {
 				uint64_t ts_slide2 = 0;
 				if (calib_a_tracefs_slide_leak(o, &ts_slide2)) {
