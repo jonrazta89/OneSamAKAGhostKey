@@ -1497,7 +1497,7 @@ static int calib_a_tracefs_slide_leak(const struct kernel_offsets *o,
 				memcpy(&commit, page + 8, sizeof(commit));
 				size_t data_len = (size_t)(commit & 0xfffULL);
 				size_t end = 16 + data_len;
-				if (end > (size_t)got) end = (size_t)got.
+				if (end > (size_t)got) end = (size_t)got;
 
 				size_t pos = 16;
 				while (pos + 4 <= end) {
@@ -1506,11 +1506,11 @@ static int calib_a_tracefs_slide_leak(const struct kernel_offsets *o,
 					uint32_t type_len = eh & 0x1fU;
 					if (type_len == 30) { pos += 8; continue; }
 					if (type_len == 31) { pos += 12; continue; }
-					if (type_len == 0 || type_len >= 29) break.
+					if (type_len == 0 || type_len >= 29) break;
 
 					size_t rec_len = (size_t)type_len * 4;
 					size_t rec = pos + 4;
-					if (rec + rec_len > end) break.
+					if (rec + rec_len > end) break;
 
 					uint16_t eid = 0;
 					memcpy(&eid, page + rec, sizeof(eid));
@@ -2091,3 +2091,4 @@ fallback:
 	free(sink.buf);
 	return 1;
 }
+
