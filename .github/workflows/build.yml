@@ -1,0 +1,70 @@
+name: Build APK
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          yes | sdkmanager --licenses || true
+
+      - name: Prepare signing (CI keystore)
+        run: |
+          mkdir -p app/keystore
+          keytool -genkeypair -v -keystore app/keystore/release.keystore -storetype PKCS12 \
+            -alias cve98260 -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "${{ secrets.CVE98260_STORE_PASSWORD || 'ghostkey-ci' }}" \
+            -keypass "${{ secrets.CVE98260_KEY_PASSWORD || 'ghostkey-ci' }}" \
+            -dname "CN=GhostKey CI, OU=CI, O=GhostKey, L=NA, S=NA, C=US"
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_SDK_ROOT
+          ndk.dir=$ANDROID_SDK_ROOT/ndk/27.2.12479018
+          CVE98260_STORE_PASSWORD=${{ secrets.CVE98260_STORE_PASSWORD || 'ghostkey-ci' }}
+          CVE98260_KEY_PASSWORD=${{ secrets.CVE98260_KEY_PASSWORD || 'ghostkey-ci' }}
+          EOF
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build Release APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostKey-apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
