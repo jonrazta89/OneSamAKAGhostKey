@@ -1755,7 +1755,7 @@ int calib_a_main(int argc, char **argv)
 		fprintf(stdout, "[calib_a] timer-based slide failed, trying tracefs leak...\n");
 		if (g_have_syms && g_syms) {
 			uint64_t ts_slide = 0;
-			if (calib_a_tracefs_slide_leak(o, &ts_slide)) {
+			if (calib_a_tracefs_slide_leak(o, g_syms, g_nsyms, &ts_slide)) {
 				slide = ts_slide;
 				found = 1;
 				fprintf(stdout, "[calib_a] tracefs leak provided slide=%#llx\n",
@@ -1787,7 +1787,7 @@ int calib_a_main(int argc, char **argv)
 			fprintf(stdout, "[calib_a] slide is weak/unaligned, cross-checking with tracefs...\n");
 			if (g_have_syms && g_syms) {
 				uint64_t ts_slide2 = 0;
-				if (calib_a_tracefs_slide_leak(o, &ts_slide2)) {
+				if (calib_a_tracefs_slide_leak(o, g_syms, g_nsyms, &ts_slide2)) {
 					if (ts_slide2 != slide) {
 						fprintf(stdout, "[calib_a] tracefs corrects slide: %#llx -> %#llx\n",
 							(unsigned long long)slide,
