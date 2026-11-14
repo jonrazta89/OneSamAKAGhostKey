@@ -116,10 +116,6 @@ object ImgToProfile {
             syms["system_unbound_wq"]?.let { offset["system_unbound_wq"] = it }
             syms["selinux_enforcing"]?.let { offset["selinux_enforcing_off"] = it }
         }
-        // ghostlock-s26 physical params derivable from boot image when available
-        if (info.kernelPhysLoad != 0L) {
-            offset["phys_load"] = info.kernelPhysLoad
-        }
 
         // kitimer_node = k_itimer.it 的偏移 + cpu_timer.node 的偏移（6.18=0xe0，6.6=0x78）
         val kitimerNode = run {
