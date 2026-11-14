@@ -58,7 +58,16 @@
 #include "kernel_table.h"
 #include "calib.h"
 #include "slide_resolve.h"
-#include "params.h"
+
+/* KIMAGE_TEXT_BASE from params.h - kernel text virtual base address */
+#ifndef KIMAGE_TEXT_BASE
+#define KIMAGE_TEXT_BASE 0xffffffc080000000ULL
+#endif
+
+/* SR_SLIDE_ALIGN from slide_resolve.h - 2MiB KASLR slide alignment */
+#ifndef SR_SLIDE_ALIGN
+#define SR_SLIDE_ALIGN   0x200000ULL
+#endif
 
 #define TRACE "/sys/kernel/tracing"
 #define TRIGGER TRACE "/events/kmem/rss_stat/trigger"
